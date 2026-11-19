@@ -1,4 +1,10 @@
-export type JobCategory = 'all' | 'tech_remote' | 'top_companies' | 'sarkari_govt';
+export type JobCategory =
+  | 'all'
+  | 'foreign_remote'
+  | 'linkedin'
+  | 'tech_remote'
+  | 'top_companies'
+  | 'sarkari_govt';
 
 export type ApplicationStatus =
   | 'discovered'
@@ -15,7 +21,7 @@ export interface JobListing {
   company: string;
   location: string;
   category: JobCategory;
-  source: 'RemoteOK' | 'Arbeitnow' | 'Greenhouse' | 'Lever' | 'Sarkari_Govt_IT' | 'Direct';
+  source: 'RemoteOK' | 'Arbeitnow' | 'Greenhouse' | 'Lever' | 'LinkedIn' | 'Sarkari_Govt_IT' | 'Direct';
   url: string;
   applyUrl: string;
   description: string;
@@ -24,6 +30,10 @@ export interface JobListing {
   postedAt: string;
   matchScore?: number;
   logoUrl?: string;
+  applyEmail?: string;
+  applicationType?: 'web_form' | 'email';
+  isForeignRemote?: boolean;
+  targetCountry?: string;
 }
 
 export interface JobQueueItem {

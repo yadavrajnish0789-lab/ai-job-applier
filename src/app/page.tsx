@@ -31,6 +31,7 @@ import {
   Square,
   AlertTriangle,
   Landmark,
+  Mail,
 } from 'lucide-react';
 import { defaultProfile } from '@/data/defaultProfile';
 import { MasterProfile, TailoredResumeData } from '@/types/profile';
@@ -100,6 +101,21 @@ export default function Dashboard() {
 
   // Modal Screenshot state
   const [activeScreenshot, setActiveScreenshot] = useState<{ url: string; title: string } | null>(null);
+
+  // Email Cold Pitch Modal state
+  const [emailModal, setEmailModal] = useState<{
+    isOpen: boolean;
+    isLoading: boolean;
+    job?: JobListing;
+    recipient?: string;
+    subject?: string;
+    body?: string;
+    gmailComposeUrl?: string;
+    pdfBase64?: string;
+    pdfFileName?: string;
+    isSending?: boolean;
+    sendSuccess?: boolean;
+  } | null>(null);
 
   // ==========================================
   // TAB 3 & 4: RESUME TAILORING STATES
@@ -201,6 +217,82 @@ export default function Dashboard() {
     setTimeout(() => {
       triggerNotification(`Loaded: ${job.title} at ${job.company}`);
     }, 100);
+  };
+
+  const handleOpenEmailApply = async (job: JobListing) => {
+    setEmailModal({
+      isOpen: true,
+      isLoading: true,
+      job,
+    });
+
+    try {
+      const res = await fetch('/api/email-apply/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job, profile, autoSend: false }),
+      });
+      const data = await res.json();
+      if (data.success && data.draft) {
+        setEmailModal({
+          isOpen: true,
+          isLoading: false,
+          job,
+          recipient: data.draft.recipient,
+          subject: data.draft.subject,
+          body: data.draft.body,
+          gmailComposeUrl: data.draft.gmailComposeUrl,
+          pdfBase64: data.draft.pdfBase64,
+          pdfFileName: data.draft.pdfFileName,
+        });
+      } else {
+        alert('Failed to generate cold pitch: ' + (data.error || 'Unknown error'));
+        setEmailModal(null);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      alert('Error: ' + msg);
+      setEmailModal(null);
+    }
+  };
+
+  const handleSendSmtpEmail = async () => {
+    if (!emailModal || !emailModal.job) return;
+    setEmailModal((prev) => (prev ? { ...prev, isSending: true } : null));
+
+    try {
+      const res = await fetch('/api/email-apply/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job: emailModal.job,
+          profile,
+          autoSend: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.mode === 'smtp_sent') {
+        setEmailModal((prev) => (prev ? { ...prev, isSending: false, sendSuccess: true } : null));
+        triggerNotification('Email application sent successfully via SMTP!');
+      } else {
+        setEmailModal((prev) => (prev ? { ...prev, isSending: false } : null));
+        alert('SMTP Notice: ' + (data.note || data.error || 'Use 1-Click Gmail button to send from your personal email.'));
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setEmailModal((prev) => (prev ? { ...prev, isSending: false } : null));
+      alert('Failed to send SMTP email: ' + msg);
+    }
+  };
+
+  const handleDownloadEmailPdf = () => {
+    if (!emailModal?.pdfBase64) return;
+    const link = document.createElement('a');
+    link.href = `data:application/pdf;base64,${emailModal.pdfBase64}`;
+    link.download = emailModal.pdfFileName || 'Tailored_ATS_Resume.pdf';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   // Run Sequential Batch Auto-Apply
@@ -450,6 +542,155 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Cold Application Email Modal */}
+      {emailModal?.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="relative max-w-2xl w-full max-h-[92vh] flex flex-col bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-slate-950">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+                <Mail className="w-5 h-5 text-blue-400" />
+                <span>AI Cold Email Application: {emailModal.job?.company}</span>
+              </div>
+              <button
+                onClick={() => setEmailModal(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-auto p-5 space-y-4 flex-1">
+              {emailModal.isLoading ? (
+                <div className="py-16 text-center space-y-3">
+                  <RefreshCw className="w-8 h-8 text-blue-400 animate-spin mx-auto" />
+                  <p className="text-sm text-slate-300">
+                    Gemini 2.5 is writing an executive cold email pitch & generating your tailored ATS PDF...
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      To (Recruiter / Hiring Team):
+                    </label>
+                    <input
+                      type="text"
+                      value={emailModal.recipient || ''}
+                      onChange={(e) =>
+                        setEmailModal((prev) => (prev ? { ...prev, recipient: e.target.value } : null))
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      Subject Line:
+                    </label>
+                    <input
+                      type="text"
+                      value={emailModal.subject || ''}
+                      onChange={(e) =>
+                        setEmailModal((prev) => (prev ? { ...prev, subject: e.target.value } : null))
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-medium"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                      Personalized Pitch Body:
+                    </label>
+                    <textarea
+                      rows={8}
+                      value={emailModal.body || ''}
+                      onChange={(e) =>
+                        setEmailModal((prev) => (prev ? { ...prev, body: e.target.value } : null))
+                      }
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs text-slate-200 leading-relaxed font-sans"
+                    />
+                  </div>
+
+                  {emailModal.pdfBase64 && (
+                    <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <FileCheck className="w-4 h-4 text-emerald-400" />
+                        <div>
+                          <div className="text-xs font-semibold text-slate-200">
+                            {emailModal.pdfFileName || 'Tailored_ATS_Resume.pdf'}
+                          </div>
+                          <div className="text-[10px] text-slate-400">
+                            Custom ATS resume tailored in-memory for this role
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleDownloadEmailPdf}
+                        className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium border border-slate-700 flex items-center gap-1 cursor-pointer"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>Download PDF</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {emailModal.sendSuccess && (
+                    <div className="p-3 bg-emerald-950/60 border border-emerald-500/50 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Application successfully sent to {emailModal.recipient}!</span>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {!emailModal.isLoading && (
+              <div className="px-5 py-3 border-t border-slate-800 bg-slate-950 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <button
+                  onClick={() => setEmailModal(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium cursor-pointer"
+                >
+                  Close
+                </button>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                  {emailModal.gmailComposeUrl && (
+                    <a
+                      href={emailModal.gmailComposeUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-4 py-2 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white rounded-xl text-xs font-semibold shadow flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>Open in Gmail (1-Click Send)</span>
+                      <ExternalLink className="w-3 h-3 ml-0.5" />
+                    </a>
+                  )}
+
+                  <button
+                    onClick={handleSendSmtpEmail}
+                    disabled={emailModal.isSending}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {emailModal.isSending ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Sending SMTP...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        <span>Auto-Send via SMTP</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Top Navigation Bar */}
       <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
@@ -582,7 +823,35 @@ export default function Dashboard() {
                         : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    🌐 All Sources ({discoveredJobs.length})
+                    🌐 All ({discoveredJobs.length})
+                  </button>
+                  <button
+                    onClick={() => {
+                      setJobCategory('foreign_remote');
+                      loadJobs('foreign_remote', searchQuery);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                      jobCategory === 'foreign_remote'
+                        ? 'bg-emerald-600 text-white shadow'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Globe className="w-3.5 h-3.5" />
+                    <span>🌍 Foreign Remote (US/EU)</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setJobCategory('linkedin');
+                      loadJobs('linkedin', searchQuery);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                      jobCategory === 'linkedin'
+                        ? 'bg-sky-600 text-white shadow'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Briefcase className="w-3.5 h-3.5" />
+                    <span>💼 LinkedIn Remote</span>
                   </button>
                   <button
                     onClick={() => {
@@ -597,19 +866,6 @@ export default function Dashboard() {
                   >
                     <Landmark className="w-3.5 h-3.5" />
                     <span>🏛️ Sarkari / Govt IT</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      setJobCategory('tech_remote');
-                      loadJobs('tech_remote', searchQuery);
-                    }}
-                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${
-                      jobCategory === 'tech_remote'
-                        ? 'bg-blue-600 text-white shadow'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    💻 Remote Global
                   </button>
                   <button
                     onClick={() => {
@@ -905,11 +1161,27 @@ export default function Dashboard() {
                                         ? 'bg-amber-950 text-amber-300 border-amber-700'
                                         : isTopCompany
                                         ? 'bg-purple-950 text-purple-300 border-purple-700'
+                                        : job.source === 'LinkedIn'
+                                        ? 'bg-sky-950 text-sky-300 border-sky-700'
                                         : 'bg-blue-950 text-blue-300 border-blue-700'
                                     }`}
                                   >
                                     {job.source}
                                   </span>
+
+                                  {job.isForeignRemote && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-950 text-emerald-300 border border-emerald-700 flex items-center gap-1">
+                                      <Globe className="w-2.5 h-2.5" />
+                                      <span>Foreign Remote</span>
+                                    </span>
+                                  )}
+
+                                  {job.applyEmail && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-950 text-indigo-300 border border-indigo-700 flex items-center gap-1">
+                                      <Mail className="w-2.5 h-2.5" />
+                                      <span>Email Apply</span>
+                                    </span>
+                                  )}
 
                                   {job.salary && (
                                     <span className="text-[11px] text-emerald-400 font-mono">
@@ -972,13 +1244,23 @@ export default function Dashboard() {
                               <ExternalLink className="w-3 h-3" />
                             </a>
 
-                            <button
-                              onClick={() => handleDirectApply(job)}
-                              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md flex items-center gap-1 cursor-pointer transition-colors"
-                            >
-                              <Play className="w-3 h-3 fill-current" />
-                              <span>Auto-Apply</span>
-                            </button>
+                            {job.applyEmail ? (
+                              <button
+                                onClick={() => handleOpenEmailApply(job)}
+                                className="px-3 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md flex items-center gap-1.5 cursor-pointer transition-all"
+                              >
+                                <Mail className="w-3 h-3" />
+                                <span>Send AI Cold Pitch</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleDirectApply(job)}
+                                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md flex items-center gap-1 cursor-pointer transition-colors"
+                              >
+                                <Play className="w-3 h-3 fill-current" />
+                                <span>Auto-Apply</span>
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
