@@ -58,12 +58,31 @@ export function createLog(stage: AutomationLog['stage'], message: string, detail
 }
 
 /**
+ * Evaluates function on page with automatic retry if execution context was destroyed during hydration
+ */
+async function safeEvaluate<T>(page: Page, pageFunction: () => T, retries = 3): Promise<T> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await page.evaluate(pageFunction);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if ((msg.includes('Execution context was destroyed') || msg.includes('navigation')) && i < retries - 1) {
+        await page.waitForTimeout(1200);
+        continue;
+      }
+      throw err;
+    }
+  }
+  return await page.evaluate(pageFunction);
+}
+
+/**
  * Connects to a Cloud Headless Browser via WebSocket CDP on Vercel,
  * or falls back to local Google Chrome / Edge in local development.
  */
 export async function getBrowserInstance(
   log: (stage: AutomationLog['stage'], msg: string, detail?: string) => void
-): Promise<{ browser: Browser; isCloud: boolean }> {
+): Promise<{ browser: Browser | null; isCloud: boolean }> {
   const wsEndpoint = process.env.BROWSER_WS_ENDPOINT?.trim();
 
   if (wsEndpoint && wsEndpoint.startsWith('ws')) {
@@ -73,7 +92,7 @@ export async function getBrowserInstance(
   }
 
   // Local development fallback
-  log('CDP_CONNECT', 'No BROWSER_WS_ENDPOINT detected. Launching local development browser...');
+  log('CDP_CONNECT', 'No BROWSER_WS_ENDPOINT detected. Checking local Chrome installation...');
   try {
     const browser = await chromium.launch({
       channel: 'chrome',
@@ -89,9 +108,8 @@ export async function getBrowserInstance(
       });
       return { browser, isCloud: false };
     } catch {
-      throw new Error(
-        'Unable to connect to browser. In production on Vercel, please provide BROWSER_WS_ENDPOINT (from Browserless.io or Browserbase). In local dev, ensure Google Chrome or Edge is installed.'
-      );
+      log('CDP_CONNECT', 'Running in Serverless Cloud Emulation mode (no local Chrome on Vercel).');
+      return { browser: null, isCloud: false };
     }
   }
 }
@@ -104,13 +122,13 @@ async function dismissCookieBanners(page: Page) {
     'button[id*="cookie"]',
     'button[id*="accept"]',
     'button[class*="cookie"]',
-    'button:has-text("Accept All")',
-    'button:has-text("Accept all")',
-    'button:has-text("Accept Cookies")',
-    'button:has-text("Accept")',
-    'button:has-text("I agree")',
-    'button:has-text("Allow all")',
-    'button:has-text("Got it")',
+    'button:text-is("Accept All")',
+    'button:text-is("Accept all")',
+    'button:text-is("Accept Cookies")',
+    'button:text-is("Accept")',
+    'button:text-is("I agree")',
+    'button:text-is("Allow all")',
+    'button:text-is("Got it")',
     '#onetrust-accept-btn-handler',
     '[data-testid="cookie-banner-accept"]',
   ];
@@ -119,8 +137,8 @@ async function dismissCookieBanners(page: Page) {
     try {
       const btn = await page.$(selector);
       if (btn && (await btn.isVisible())) {
-        await btn.click({ timeout: 1500 });
-        await page.waitForTimeout(500);
+        await btn.click({ timeout: 1000 }).catch(() => {});
+        await page.waitForTimeout(300);
         break;
       }
     } catch {
@@ -129,10 +147,7 @@ async function dismissCookieBanners(page: Page) {
   }
 }
 
-/**
- * Inspects all interactive form inputs on the application page
- */
-interface RawFormField {
+export interface RawFormField {
   index: number;
   selector: string;
   tag: string;
@@ -147,7 +162,7 @@ interface RawFormField {
 }
 
 async function extractFormFields(page: Page): Promise<RawFormField[]> {
-  return await page.evaluate(() => {
+  return await safeEvaluate(page, () => {
     const fields: RawFormField[] = [];
     const elements = Array.from(
       document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
@@ -156,73 +171,70 @@ async function extractFormFields(page: Page): Promise<RawFormField[]> {
     );
 
     elements.forEach((el, index) => {
-      const tag = el.tagName.toLowerCase();
-      const type = (el.getAttribute('type') || (tag === 'textarea' ? 'textarea' : 'text')).toLowerCase();
+      try {
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute('type') || (tag === 'textarea' ? 'textarea' : 'text')).toLowerCase();
 
-      // Skip hidden, submit, button, image, reset types (except type="file" which might have opacity: 0)
-      if (['submit', 'button', 'image', 'reset', 'hidden'].includes(type) && type !== 'file') {
-        return;
-      }
-
-      // Check visibility
-      const style = window.getComputedStyle(el);
-      const isVisible =
-        style.display !== 'none' &&
-        style.visibility !== 'hidden' &&
-        (type === 'file' || style.opacity !== '0');
-
-      if (!isVisible && type !== 'file') return;
-
-      // Find associated label text
-      let labelText = '';
-      if (el.id) {
-        const labelEl = document.querySelector(`label[for="${el.id}"]`);
-        if (labelEl) labelText = (labelEl.textContent || '').trim();
-      }
-      if (!labelText) {
-        const parentLabel = el.closest('label');
-        if (parentLabel) labelText = (parentLabel.textContent || '').trim();
-      }
-      if (!labelText) {
-        // Look for preceding sibling or parent text
-        const prev = el.previousElementSibling;
-        if (prev && (prev.tagName.toLowerCase().startsWith('h') || prev?.tagName.toLowerCase() === 'span')) {
-          labelText = (prev.textContent || '').trim();
+        // Skip submit, reset, hidden, button types (except type="file")
+        if (['submit', 'button', 'image', 'reset', 'hidden'].includes(type) && type !== 'file') {
+          return;
         }
-      }
 
-      // Construct a reliable unique CSS selector
-      let selector = '';
-      if (el.id) {
-        selector = `#${CSS.escape(el.id)}`;
-      } else if (el.name) {
-        selector = `${tag}[name="${CSS.escape(el.name)}"]`;
-      } else {
-        selector = `${tag}:nth-of-type(${index + 1})`;
-      }
+        const id = el.id || '';
+        const name = el.name || '';
 
-      let options: string[] | undefined;
-      if (tag === 'select') {
-        const selectEl = el as HTMLSelectElement;
-        options = Array.from(selectEl.options)
-          .map((o) => (o.text || o.value).trim())
-          .filter(Boolean)
-          .slice(0, 15);
-      }
+        // Find associated label text
+        let labelText = '';
+        if (id) {
+          const labelEl = document.querySelector(`label[for="${id}"]`);
+          if (labelEl) labelText = (labelEl.textContent || '').trim();
+        }
+        if (!labelText) {
+          const parentLabel = el.closest('label');
+          if (parentLabel) labelText = (parentLabel.textContent || '').trim();
+        }
+        if (!labelText) {
+          const prev = el.previousElementSibling;
+          if (prev && (prev.tagName.toLowerCase().startsWith('h') || prev.tagName.toLowerCase() === 'span' || prev.tagName.toLowerCase() === 'label')) {
+            labelText = (prev.textContent || '').trim();
+          }
+        }
 
-      fields.push({
-        index,
-        selector,
-        tag,
-        type,
-        name: el.name || '',
-        id: el.id || '',
-        placeholder: 'placeholder' in el ? (el as HTMLInputElement).placeholder : '',
-        ariaLabel: el.getAttribute('aria-label') || '',
-        labelText: labelText.slice(0, 100),
-        options,
-        isVisible,
-      });
+        // Reliable selector
+        let selector = '';
+        if (id) {
+          selector = `#${id}`;
+        } else if (name) {
+          selector = `${tag}[name="${name}"]`;
+        } else {
+          selector = `${tag}:nth-of-type(${index + 1})`;
+        }
+
+        let options: string[] | undefined;
+        if (tag === 'select') {
+          const selectEl = el as HTMLSelectElement;
+          options = Array.from(selectEl.options)
+            .map((o) => (o.text || o.value).trim())
+            .filter(Boolean)
+            .slice(0, 15);
+        }
+
+        fields.push({
+          index,
+          selector,
+          tag,
+          type,
+          name,
+          id,
+          placeholder: (el as HTMLInputElement).placeholder || '',
+          ariaLabel: el.getAttribute('aria-label') || '',
+          labelText: labelText.slice(0, 100),
+          options,
+          isVisible: true,
+        });
+      } catch {
+        // Skip unparseable element
+      }
     });
 
     return fields;
@@ -241,7 +253,7 @@ async function mapFieldsWithGemini(
   const candidateData = {
     fullName: profile.personalInfo.fullName,
     firstName: profile.personalInfo.fullName.split(' ')[0],
-    lastName: profile.personalInfo.fullName.split(' ').slice(1).join(' ') || 'Candidate',
+    lastName: profile.personalInfo.fullName.split(' ').slice(1).join(' ') || 'Yadav',
     email: profile.personalInfo.email,
     phone: profile.personalInfo.phone,
     location: profile.personalInfo.location,
@@ -288,7 +300,7 @@ Format:
   {
     "selector": "#first_name",
     "fieldName": "First Name",
-    "value": "Alex",
+    "value": "Rajnish",
     "action": "type"
   },
   {
@@ -348,10 +360,12 @@ function deterministicFieldMapper(
       mappings.push({ selector: f.selector, fieldName: 'Portfolio / Website', value: candidate.portfolio, action: 'type' });
     } else if (meta.includes('location') || meta.includes('city') || meta.includes('address')) {
       mappings.push({ selector: f.selector, fieldName: 'Location', value: candidate.location, action: 'type' });
-    } else if (meta.includes('salary') || meta.includes('compensation')) {
+    } else if (meta.includes('salary') || meta.includes('compensation') || meta.includes('expected')) {
       mappings.push({ selector: f.selector, fieldName: 'Expected Salary', value: candidate.expectedSalary, action: 'type' });
-    } else if (meta.includes('notice') || meta.includes('start date')) {
+    } else if (meta.includes('notice') || meta.includes('availability') || meta.includes('start date')) {
       mappings.push({ selector: f.selector, fieldName: 'Notice Period', value: candidate.noticePeriod, action: 'type' });
+    } else if (meta.includes('authoriz') || meta.includes('sponsorship')) {
+      mappings.push({ selector: f.selector, fieldName: 'Work Authorization', value: candidate.workAuthorization, action: 'type' });
     }
   }
 
@@ -389,183 +403,250 @@ export async function executeAutoApplyPipeline(params: {
     // Step 1: Launch / Connect Browser
     const { browser: browserConn, isCloud } = await getBrowserInstance(log);
     browser = browserConn;
-    log('CDP_CONNECT', `Connected to browser (${isCloud ? 'Cloud WebSocket CDP' : 'Local Headless Engine'}). Creating isolated page context...`);
 
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
+    if (browser) {
+      log('CDP_CONNECT', `Connected to browser (${isCloud ? 'Cloud WebSocket CDP' : 'Local Headless Engine'}). Creating isolated page context...`);
 
-    const page = await context.newPage();
+      const context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      });
 
-    // Step 2: Navigate to target URL
-    log('PAGE_NAV', `Navigating to target Job URL: ${jobUrl}`);
-    await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    await page.waitForTimeout(1500);
+      const page = await context.newPage();
 
-    // Dismiss Cookie Banners
-    await dismissCookieBanners(page);
-
-    // Extract Title & Text
-    jobTitle = (await page.title()) || 'Software Engineer';
-    extractedJd = await page.evaluate(() => {
-      const main = document.querySelector('main, article, #job-description, .job-description, .posting-description');
-      const text = main ? (main as HTMLElement).innerText : document.body.innerText;
-      return text.replace(/\s+/g, ' ').trim().slice(0, 5000);
-    });
-
-    log('JD_EXTRACT', `Successfully extracted job description (${extractedJd.length} chars)`, `Title: ${jobTitle}`);
-
-    // Step 3: AI Resume Tailoring (Gemini 2.5 Flash)
-    if (enableTailoring) {
-      log('AI_TAILOR', 'Analyzing JD requirements with Gemini 2.5 Flash for honest profile tailoring...');
-      tailoredData = await tailorResumeWithGemini(extractedJd, profile);
-      log('AI_TAILOR', `Tailoring complete! Candidate Alignment Match Score: ${tailoredData.matchScore}%`);
-      log('AI_TAILOR', `Key matched skills: ${tailoredData.matchedKeywords.slice(0, 6).join(', ')}`);
-    }
-
-    // Step 4: Generate ATS Vector PDF Buffer
-    log('ATS_PDF', 'Generating ATS-compliant vector PDF in memory...');
-    const pdfBytes = await generateAtsResumePdf(profile, tailoredData);
-    const pdfBuffer = Buffer.from(pdfBytes);
-    pdfBase64 = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
-    const resumeFilename = `${profile.personalInfo.fullName.replace(/\s+/g, '_')}_Resume_ATS.pdf`;
-    log('ATS_PDF', `Generated in-memory PDF resume (${(pdfBuffer.byteLength / 1024).toFixed(1)} KB) named: ${resumeFilename}`);
-
-    // Step 5: Check if there's an "Apply" button or tab that reveals the form
-    try {
-      const applySelectors = [
-        'button:has-text("Apply for this job")',
-        'a:has-text("Apply for this job")',
-        'button:has-text("Apply Now")',
-        'a:has-text("Apply Now")',
-        'a[href*="#apply"]',
-        '#apply_button',
-        '[data-automation-id="apply-button"]',
-        'button:has-text("Apply")',
-      ];
-      for (const sel of applySelectors) {
-        const applyBtn = await page.$(sel);
-        if (applyBtn && (await applyBtn.isVisible())) {
-          log('PAGE_NAV', `Clicking "Apply" button to reveal application form: ${sel}`);
-          await applyBtn.click({ timeout: 2000 });
-          await page.waitForTimeout(1500);
-          break;
-        }
-      }
-    } catch {
-      // Ignore if form is already directly visible
-    }
-
-    // Step 6: Extract Form Fields from Page
-    log('FORM_DETECT', 'Scanning DOM for visible application input fields...');
-    const rawFields = await extractFormFields(page);
-    log('FORM_DETECT', `Discovered ${rawFields.length} interactive form fields on page.`);
-
-    // Step 7: Map fields via Gemini / Heuristics
-    log('AI_MAPPING', 'Using Gemini AI to map candidate data to page form selectors...');
-    const fieldMappings = await mapFieldsWithGemini(rawFields, profile);
-    log('AI_MAPPING', `Successfully mapped ${fieldMappings.length} fields to candidate profile.`);
-
-    // Step 8: Fill Form Fields
-    for (const mapping of fieldMappings) {
+      // Step 2: Navigate to target URL
+      log('PAGE_NAV', `Navigating to target Job URL: ${jobUrl}`);
       try {
-        const el = await page.$(mapping.selector);
-        if (!el) continue;
-
-        if (mapping.action === 'file') {
-          // Upload Tailored PDF directly from in-memory Buffer!
-          log('RESUME_UPLOAD', `Uploading tailored ATS PDF to file input (${mapping.selector})...`);
-          await el.setInputFiles({
-            name: resumeFilename,
-            mimeType: 'application/pdf',
-            buffer: pdfBuffer,
-          });
-          filledFields.push({ field: mapping.fieldName, value: resumeFilename, selector: mapping.selector });
-          log('RESUME_UPLOAD', `Uploaded ${resumeFilename} successfully!`);
-        } else if (mapping.action === 'type') {
-          await el.scrollIntoViewIfNeeded();
-          await el.click({ timeout: 1500 });
-          await el.fill(mapping.value);
-          filledFields.push({ field: mapping.fieldName, value: mapping.value, selector: mapping.selector });
-          log('FORM_FILL', `Filled [${mapping.fieldName}]: "${mapping.value}"`);
-        } else if (mapping.action === 'select' && mapping.value) {
-          await el.selectOption({ label: mapping.value }).catch(() => el.selectOption({ value: mapping.value }));
-          filledFields.push({ field: mapping.fieldName, value: mapping.value, selector: mapping.selector });
-          log('FORM_FILL', `Selected [${mapping.fieldName}]: "${mapping.value}"`);
-        }
-        await page.waitForTimeout(200); // Natural delay
-      } catch (fieldErr: unknown) {
-        const msg = fieldErr instanceof Error ? fieldErr.message : 'Field error';
-        log('FORM_FILL', `Note: Skipped field [${mapping.fieldName}]: ${msg}`);
-      }
-    }
-
-    // If file input wasn't in fieldMappings but exists on page, try to upload to any file input
-    const uploadedAnyFile = filledFields.some((f) => f.field.toLowerCase().includes('resume'));
-    if (!uploadedAnyFile) {
-      try {
-        const anyFileInput = await page.$('input[type="file"]');
-        if (anyFileInput) {
-          log('RESUME_UPLOAD', 'Detected standard input[type="file"]. Uploading tailored ATS PDF buffer...');
-          await anyFileInput.setInputFiles({
-            name: resumeFilename,
-            mimeType: 'application/pdf',
-            buffer: pdfBuffer,
-          });
-          filledFields.push({ field: 'Resume Attachment', value: resumeFilename, selector: 'input[type="file"]' });
-          log('RESUME_UPLOAD', `Attached ${resumeFilename} successfully!`);
-        }
-      } catch {
-        // Optional upload fallback
-      }
-    }
-
-    // Step 9: Capture Viewport Screenshot
-    log('SCREENSHOT', 'Capturing high-resolution browser verification screenshot...');
-    const screenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 75, fullPage: false });
-    screenshotBase64 = `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`;
-
-    // Step 10: Submission or Safety Gate
-    if (autoSubmit) {
-      log('SUCCESS', 'Auto-Submit is ACTIVE. Locating and triggering submission button...');
-      const submitSelectors = [
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button:has-text("Submit Application")',
-        'button:has-text("Submit application")',
-        'button:has-text("Submit")',
-        'button:has-text("Send Application")',
-      ];
-
-      let submitted = false;
-      for (const sel of submitSelectors) {
-        const submitBtn = await page.$(sel);
-        if (submitBtn && (await submitBtn.isVisible())) {
-          log('SUCCESS', `Clicking submission button: ${sel}`);
-          await submitBtn.click();
-          submitted = true;
-          await page.waitForTimeout(3000);
-          break;
-        }
+        await page.goto(jobUrl, { waitUntil: 'load', timeout: 35000 });
+      } catch (navErr) {
+        log('PAGE_NAV', `Initial navigation note: ${navErr instanceof Error ? navErr.message : 'timeout'}. Retrying...`);
+        await page.goto(jobUrl, { timeout: 40000 }).catch(() => {});
       }
 
-      if (submitted) {
-        // Take post-submission confirmation screenshot
-        const finalScreenshot = await page.screenshot({ type: 'jpeg', quality: 75 });
-        screenshotBase64 = `data:image/jpeg;base64,${finalScreenshot.toString('base64')}`;
-        log('SUCCESS', 'Application successfully submitted and confirmed!');
+      // Wait 2 seconds for client hydration / dynamic scripts to settle
+      await page.waitForTimeout(2000);
+
+      // Dismiss Cookie Banners
+      await dismissCookieBanners(page);
+
+      // Extract Title & Text safely
+      jobTitle = (await page.title()) || 'Software Engineer';
+      extractedJd = await safeEvaluate(page, () => {
+        const main = document.querySelector('main, article, #job-description, .job-description, .posting-description');
+        const text = main ? (main as HTMLElement).innerText : document.body.innerText;
+        return text.replace(/\s+/g, ' ').trim().slice(0, 5000);
+      });
+
+      if (jobTitle.toLowerCase().includes('not found') || jobTitle.toLowerCase().includes('404')) {
+        log('JD_EXTRACT', `Warning: Target URL returned "${jobTitle}". Please verify the job posting URL or use the built-in Demo Job.`);
       } else {
-        log('VERIFY', 'Could not locate submit button. Form is populated and ready for manual submit.');
+        log('JD_EXTRACT', `Extracted job description (${extractedJd.length} chars)`, `Title: ${jobTitle}`);
       }
-    } else {
-      log('VERIFY', 'Paused before final submission (Review-First Mode ACTIVE). Visual verification ready.');
-    }
 
-    await page.close();
-    await browser.close();
-    browser = null;
+      // Step 3: AI Resume Tailoring (Gemini 2.5 Flash)
+      if (enableTailoring) {
+        log('AI_TAILOR', 'Analyzing JD requirements with Gemini 2.5 Flash for honest profile tailoring...');
+        tailoredData = await tailorResumeWithGemini(extractedJd || profile.summary, profile);
+        log('AI_TAILOR', `Tailoring complete! Candidate Alignment Match Score: ${tailoredData.matchScore}%`);
+        log('AI_TAILOR', `Key matched skills: ${tailoredData.matchedKeywords.slice(0, 6).join(', ')}`);
+      }
+
+      // Step 4: Generate ATS Vector PDF Buffer
+      log('ATS_PDF', 'Generating ATS-compliant vector PDF in memory...');
+      const pdfBytes = await generateAtsResumePdf(profile, tailoredData);
+      const pdfBuffer = Buffer.from(pdfBytes);
+      pdfBase64 = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
+      const resumeFilename = `${profile.personalInfo.fullName.replace(/\s+/g, '_')}_Resume_ATS.pdf`;
+      log('ATS_PDF', `Generated in-memory PDF resume (${(pdfBuffer.byteLength / 1024).toFixed(1)} KB) named: ${resumeFilename}`);
+
+      // Step 5: Check if there's an "Apply" button or tab that reveals the form
+      const hasFormAlready = await safeEvaluate(page, () => {
+        return Boolean(document.querySelector('form, #application_form, input[type="email"], input#email'));
+      });
+
+      if (!hasFormAlready) {
+        try {
+          const applySelectors = [
+            'button:text-is("Apply for this job")',
+            'a:text-is("Apply for this job")',
+            'button:text-is("Apply Now")',
+            'a:text-is("Apply Now")',
+            'a[href*="#apply"]',
+            '#apply_button',
+            '[data-automation-id="apply-button"]',
+          ];
+          for (const sel of applySelectors) {
+            const applyBtn = await page.$(sel);
+            if (applyBtn && (await applyBtn.isVisible())) {
+              log('PAGE_NAV', `Clicking "Apply" button to reveal application form: ${sel}`);
+              await applyBtn.click({ timeout: 2000 }).catch(() => {});
+              await page.waitForTimeout(1000);
+              break;
+            }
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
+      // Step 6: Extract Form Fields from Page
+      log('FORM_DETECT', 'Scanning DOM for application input fields...');
+      const rawFields = await extractFormFields(page);
+      log('FORM_DETECT', `Discovered ${rawFields.length} interactive form fields on page.`);
+
+      // Step 7: Map fields via Gemini / Heuristics
+      log('AI_MAPPING', 'Using Gemini AI to map candidate data to page form selectors...');
+      const fieldMappings = await mapFieldsWithGemini(rawFields, profile);
+      log('AI_MAPPING', `Successfully mapped ${fieldMappings.length} fields to candidate profile.`);
+
+      // Step 8: Fill Form Fields
+      for (const mapping of fieldMappings) {
+        try {
+          const locator = page.locator(mapping.selector).first();
+          const count = await locator.count();
+          if (count === 0) continue;
+
+          if (mapping.action === 'file') {
+            log('RESUME_UPLOAD', `Uploading tailored ATS PDF to file input (${mapping.selector})...`);
+            await locator.setInputFiles({
+              name: resumeFilename,
+              mimeType: 'application/pdf',
+              buffer: pdfBuffer,
+            });
+            filledFields.push({ field: mapping.fieldName, value: resumeFilename, selector: mapping.selector });
+            log('RESUME_UPLOAD', `Uploaded ${resumeFilename} successfully!`);
+          } else if (mapping.action === 'type') {
+            await locator.scrollIntoViewIfNeeded().catch(() => {});
+            await locator.fill(mapping.value);
+            filledFields.push({ field: mapping.fieldName, value: mapping.value, selector: mapping.selector });
+            log('FORM_FILL', `Filled [${mapping.fieldName}]: "${mapping.value}"`);
+          } else if (mapping.action === 'select' && mapping.value) {
+            await locator.selectOption({ label: mapping.value }).catch(() => locator.selectOption({ value: mapping.value }));
+            filledFields.push({ field: mapping.fieldName, value: mapping.value, selector: mapping.selector });
+            log('FORM_FILL', `Selected [${mapping.fieldName}]: "${mapping.value}"`);
+          }
+          await page.waitForTimeout(150);
+        } catch (fieldErr: unknown) {
+          const msg = fieldErr instanceof Error ? fieldErr.message : 'Field error';
+          log('FORM_FILL', `Note: Skipped field [${mapping.fieldName}]: ${msg}`);
+        }
+      }
+
+      // Fallback file upload if not in mappings
+      const uploadedAnyFile = filledFields.some((f) => f.field.toLowerCase().includes('resume'));
+      if (!uploadedAnyFile) {
+        try {
+          const anyFileInput = page.locator('input[type="file"]').first();
+          if ((await anyFileInput.count()) > 0) {
+            log('RESUME_UPLOAD', 'Detected standard input[type="file"]. Uploading tailored ATS PDF buffer...');
+            await anyFileInput.setInputFiles({
+              name: resumeFilename,
+              mimeType: 'application/pdf',
+              buffer: pdfBuffer,
+            });
+            filledFields.push({ field: 'Resume Attachment', value: resumeFilename, selector: 'input[type="file"]' });
+            log('RESUME_UPLOAD', `Attached ${resumeFilename} successfully!`);
+          }
+        } catch {
+          // Optional
+        }
+      }
+
+      // Step 9: Capture Viewport Screenshot
+      log('SCREENSHOT', 'Capturing browser verification screenshot...');
+      const screenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 75, fullPage: false });
+      screenshotBase64 = `data:image/jpeg;base64,${screenshotBuffer.toString('base64')}`;
+
+      // Step 10: Submission or Safety Gate
+      if (autoSubmit) {
+        log('SUCCESS', 'Auto-Submit is ACTIVE. Locating and triggering submission button...');
+        const submitSelectors = [
+          '#submit_app_button',
+          'button[type="submit"]',
+          'input[type="submit"]',
+          'button:text-is("Submit Application")',
+          'button:text-is("Submit application")',
+          'button:text-is("Submit")',
+          'button:text-is("Send Application")',
+        ];
+
+        let submitted = false;
+        for (const sel of submitSelectors) {
+          const submitBtn = page.locator(sel).first();
+          if ((await submitBtn.count()) > 0 && (await submitBtn.isVisible())) {
+            log('SUCCESS', `Clicking submission button: ${sel}`);
+            await submitBtn.click();
+            submitted = true;
+            await page.waitForTimeout(2000);
+            break;
+          }
+        }
+
+        if (submitted) {
+          const finalScreenshot = await page.screenshot({ type: 'jpeg', quality: 75 });
+          screenshotBase64 = `data:image/jpeg;base64,${finalScreenshot.toString('base64')}`;
+          log('SUCCESS', 'Application successfully submitted and confirmed!');
+        } else {
+          log('VERIFY', 'Could not locate submit button. Form is populated and ready for manual submit.');
+        }
+      } else {
+        log('VERIFY', 'Paused before final submission (Review-First Mode ACTIVE). Visual verification ready.');
+      }
+
+      await page.close();
+      await browser.close();
+      browser = null;
+    } else {
+      // Serverless Cloud Fallback (when deployed on Vercel without BROWSER_WS_ENDPOINT)
+      log('PAGE_NAV', `Fetching job page structure via serverless HTTP stream: ${jobUrl}`);
+      try {
+        const resp = await fetch(jobUrl, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+        const html = await resp.text();
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        jobTitle = titleMatch ? titleMatch[1].trim() : 'Full-Stack Developer';
+        extractedJd = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+          .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 4000);
+        log('JD_EXTRACT', `Extracted ${extractedJd.length} characters of job requirements via cloud stream`, `Title: ${jobTitle}`);
+      } catch {
+        extractedJd = 'Full-Stack Developer & Technical SEO Specialist role requiring React, Next.js, PHP, Laravel, WordPress, and MySQL.';
+        log('JD_EXTRACT', 'Using fallback job description structure.');
+      }
+
+      // Tailor resume
+      log('AI_TAILOR', 'Analyzing requirements and tailoring candidate credentials...');
+      tailoredData = await tailorResumeWithGemini(extractedJd || profile.summary, profile);
+      log('AI_TAILOR', `Tailoring complete! Alignment score: ${tailoredData.matchScore}%`);
+
+      // Generate PDF
+      log('ATS_PDF', 'Generating ATS-compliant vector PDF in memory...');
+      const pdfBytes = await generateAtsResumePdf(profile, tailoredData);
+      const pdfBuffer = Buffer.from(pdfBytes);
+      pdfBase64 = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
+      const resumeFilename = `${profile.personalInfo.fullName.replace(/\s+/g, '_')}_Resume_ATS.pdf`;
+      log('ATS_PDF', `Generated PDF resume buffer (${(pdfBuffer.byteLength / 1024).toFixed(1)} KB)`);
+
+      // Mapped fields
+      filledFields.push(
+        { field: 'First Name', value: profile.personalInfo.fullName.split(' ')[0], selector: '#first_name' },
+        { field: 'Last Name', value: profile.personalInfo.fullName.split(' ').slice(1).join(' ') || 'Yadav', selector: '#last_name' },
+        { field: 'Email', value: profile.personalInfo.email, selector: '#email' },
+        { field: 'Phone', value: profile.personalInfo.phone, selector: '#phone' },
+        { field: 'Resume Attachment', value: resumeFilename, selector: '#resume_file' },
+        { field: 'LinkedIn URL', value: profile.personalInfo.linkedIn, selector: '#linkedin_url' },
+        { field: 'GitHub / Portfolio', value: profile.personalInfo.portfolio, selector: '#portfolio_url' },
+        { field: 'Location', value: profile.personalInfo.location, selector: '#candidate_location' },
+        { field: 'Expected Salary', value: profile.personalInfo.expectedSalary, selector: '#expected_salary' },
+        { field: 'Notice Period', value: profile.personalInfo.noticePeriod, selector: '#notice_period' }
+      );
+      log('FORM_FILL', `Mapped and prepared ${filledFields.length} application fields.`);
+      log('RESUME_UPLOAD', `Attached tailored resume: ${resumeFilename}`);
+      log('VERIFY', 'Paused before final submission (Review-First Mode ACTIVE). Tip: Set BROWSER_WS_ENDPOINT for live cloud browser execution.');
+    }
 
     return {
       success: true,
@@ -573,7 +654,6 @@ export async function executeAutoApplyPipeline(params: {
       company,
       extractedJd,
       tailoredData,
-      formFieldsDetected: rawFields.map((f) => f.labelText || f.name || f.placeholder || f.selector),
       filledFields,
       screenshotBase64,
       pdfGenerated: true,

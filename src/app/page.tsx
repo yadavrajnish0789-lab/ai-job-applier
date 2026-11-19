@@ -48,9 +48,7 @@ export default function Dashboard() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
 
   // Auto-Apply Runner States
-  const [jobUrl, setJobUrl] = useState<string>(
-    'https://boards.greenhouse.io/demo/jobs/senior-fullstack-seo-engineer'
-  );
+  const [jobUrl, setJobUrl] = useState<string>('/demo-job');
   const [autoSubmit, setAutoSubmit] = useState<boolean>(false);
   const [enableTailoring, setEnableTailoring] = useState<boolean>(true);
   const [isRunning, setIsRunning] = useState<boolean>(false);
@@ -125,13 +123,17 @@ export default function Dashboard() {
   // Run Auto-Apply Pipeline
   const handleRunAutoApply = async () => {
     if (!jobUrl.trim()) return;
+    const resolvedUrl = jobUrl.startsWith('/')
+      ? `${window.location.origin}${jobUrl}`
+      : jobUrl;
+
     setIsRunning(true);
     setRunResult(null);
     setLogs([
       {
         timestamp: new Date().toLocaleTimeString(),
         stage: 'INIT',
-        message: `Dispatching Cloud Auto-Apply Runner for: ${jobUrl}`,
+        message: `Dispatching Cloud Auto-Apply Runner for: ${resolvedUrl}`,
       },
     ]);
 
@@ -140,7 +142,7 @@ export default function Dashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          jobUrl,
+          jobUrl: resolvedUrl,
           autoSubmit,
           enableTailoring,
           profile,
@@ -401,21 +403,21 @@ export default function Dashboard() {
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-slate-500">Quick Test URLs:</span>
                   <button
-                    onClick={() =>
-                      setJobUrl('https://boards.greenhouse.io/demo/jobs/senior-fullstack-seo-engineer')
-                    }
-                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 border border-slate-700 cursor-pointer"
+                    onClick={() => setJobUrl('/demo-job')}
+                    className="px-2.5 py-1 bg-indigo-900/60 hover:bg-indigo-800 text-indigo-200 rounded border border-indigo-700 font-semibold cursor-pointer flex items-center gap-1"
                   >
-                    Greenhouse Demo
+                    <span>🎯 Built-in Live Demo Job</span>
+                    <span className="text-[10px] bg-emerald-500/30 text-emerald-300 px-1 rounded">100% Verified</span>
                   </button>
-                  <button
-                    onClick={() =>
-                      setJobUrl('https://jobs.lever.co/demo/full-stack-laravel-nextjs-lead')
-                    }
-                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 border border-slate-700 cursor-pointer"
+                  <a
+                    href="/demo-job"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-slate-400 border border-slate-700 flex items-center gap-1"
                   >
-                    Lever Demo
-                  </button>
+                    <span>View Demo Page</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
                 </div>
               </div>
 
