@@ -20,10 +20,22 @@ import {
   Maximize2,
   X,
   FileCheck,
+  Search,
+  Building,
+  Layers,
+  Clock,
+  Send,
+  Sliders,
+  Filter,
+  CheckSquare,
+  Square,
+  AlertTriangle,
+  Landmark,
 } from 'lucide-react';
 import { defaultProfile } from '@/data/defaultProfile';
 import { MasterProfile, TailoredResumeData } from '@/types/profile';
 import { AutomationLog, FilledField } from '@/lib/browserAutomation';
+import { JobListing, JobCategory, JobQueueItem, BatchRunProgress } from '@/types/job';
 
 interface SystemStatus {
   gemini: {
@@ -40,14 +52,28 @@ interface SystemStatus {
 }
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<'runner' | 'profile' | 'resume'>('runner');
+  const [activeTab, setActiveTab] = useState<'finder' | 'runner' | 'profile' | 'resume'>('finder');
   const [profile, setProfile] = useState<MasterProfile>(defaultProfile);
   const [savedNotification, setSavedNotification] = useState<string | null>(null);
 
   // System environment status
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
 
-  // Auto-Apply Runner States
+  // ==========================================
+  // TAB 1: AUTO JOB FINDER & QUEUE STATES
+  // ==========================================
+  const [jobCategory, setJobCategory] = useState<JobCategory>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [discoveredJobs, setDiscoveredJobs] = useState<JobListing[]>([]);
+  const [isLoadingJobs, setIsLoadingJobs] = useState<boolean>(false);
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set());
+  const [batchQueue, setBatchQueue] = useState<JobQueueItem[]>([]);
+  const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
+  const [batchProgress, setBatchProgress] = useState<BatchRunProgress | null>(null);
+
+  // ==========================================
+  // TAB 2: SINGLE RUNNER STATES
+  // ==========================================
   const [jobUrl, setJobUrl] = useState<string>('/demo-job');
   const [autoSubmit, setAutoSubmit] = useState<boolean>(false);
   const [enableTailoring, setEnableTailoring] = useState<boolean>(true);
@@ -56,7 +82,7 @@ export default function Dashboard() {
     {
       timestamp: 'Ready',
       stage: 'INIT',
-      message: 'Agent ready. Enter target Job URL and launch cloud auto-apply pipeline.',
+      message: 'Agent ready. Select a job from Job Finder or enter a custom job URL.',
     },
   ]);
   const [runResult, setRunResult] = useState<{
@@ -72,9 +98,12 @@ export default function Dashboard() {
     statusMessage?: string;
   } | null>(null);
 
-  const [screenshotModalOpen, setScreenshotModalOpen] = useState<boolean>(false);
+  // Modal Screenshot state
+  const [activeScreenshot, setActiveScreenshot] = useState<{ url: string; title: string } | null>(null);
 
-  // Resume Tailoring States
+  // ==========================================
+  // TAB 3 & 4: RESUME TAILORING STATES
+  // ==========================================
   const [tailoredData, setTailoredData] = useState<TailoredResumeData | null>(null);
   const [resumeMode, setResumeMode] = useState<'master' | 'tailored'>('master');
   const [customJdInput, setCustomJdInput] = useState<string>('');
@@ -87,6 +116,11 @@ export default function Dashboard() {
       .then((res) => res.json())
       .then((data) => setSystemStatus(data))
       .catch((e) => console.error('Failed to fetch system status:', e));
+  }, []);
+
+  // Fetch initial jobs on mount
+  useEffect(() => {
+    loadJobs('all', '');
   }, []);
 
   // Local storage profile persistence
@@ -120,7 +154,96 @@ export default function Dashboard() {
     setTimeout(() => setSavedNotification(null), 3000);
   };
 
-  // Run Auto-Apply Pipeline
+  // Load jobs from discovery API
+  const loadJobs = async (cat: JobCategory, queryStr: string) => {
+    setIsLoadingJobs(true);
+    try {
+      const res = await fetch(`/api/jobs/discover?category=${cat}&query=${encodeURIComponent(queryStr)}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.jobs)) {
+        setDiscoveredJobs(data.jobs);
+      }
+    } catch (e) {
+      console.error('Failed to load jobs:', e);
+    } finally {
+      setIsLoadingJobs(false);
+    }
+  };
+
+  // Toggle selection of a job for batch applying
+  const toggleJobSelection = (id: string) => {
+    const updated = new Set(selectedJobIds);
+    if (updated.has(id)) {
+      updated.delete(id);
+    } else {
+      updated.add(id);
+    }
+    setSelectedJobIds(updated);
+  };
+
+  const selectAllJobs = () => {
+    if (selectedJobIds.size === discoveredJobs.length) {
+      setSelectedJobIds(new Set());
+    } else {
+      setSelectedJobIds(new Set(discoveredJobs.map((j) => j.id)));
+    }
+  };
+
+  // Trigger 1-Click Auto Apply for a single card directly
+  const handleDirectApply = (job: JobListing) => {
+    setJobUrl(job.applyUrl || job.url);
+    setActiveTab('runner');
+    setTimeout(() => {
+      triggerNotification(`Loaded: ${job.title} at ${job.company}`);
+    }, 100);
+  };
+
+  // Run Batch Auto-Apply
+  const handleRunBatch = async () => {
+    const selectedJobsList = discoveredJobs.filter((j) => selectedJobIds.has(j.id));
+    if (selectedJobsList.length === 0) {
+      alert('Please select at least one job to auto-apply.');
+      return;
+    }
+
+    setIsBatchRunning(true);
+    setBatchProgress({
+      total: selectedJobsList.length,
+      completed: 0,
+      successful: 0,
+      failed: 0,
+      stage: 'Preparing batch runner and loading candidate profile...',
+    });
+
+    try {
+      const res = await fetch('/api/auto-apply/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobs: selectedJobsList,
+          profile,
+          autoSubmit,
+          enableTailoring,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        setBatchProgress(data.progress);
+        setBatchQueue(data.results || []);
+        triggerNotification(`Batch Complete! ${data.progress.successful}/${data.progress.total} jobs processed.`);
+      } else {
+        alert(data.error || 'Batch auto-apply failed.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Batch execution failed';
+      alert('Batch error: ' + msg);
+    } finally {
+      setIsBatchRunning(false);
+    }
+  };
+
+  // Run Single Auto-Apply Pipeline
   const handleRunAutoApply = async () => {
     if (!jobUrl.trim()) return;
     const resolvedUrl = jobUrl.startsWith('/')
@@ -207,11 +330,12 @@ export default function Dashboard() {
     }
   };
 
-  // Download the exact uploaded PDF from run result
-  const handleDownloadUploadedPdf = () => {
-    if (!runResult?.pdfBase64) return;
+  // Download uploaded PDF from single run
+  const handleDownloadUploadedPdf = (pdfBase64Str?: string) => {
+    const target = pdfBase64Str || runResult?.pdfBase64;
+    if (!target) return;
     const a = document.createElement('a');
-    a.href = runResult.pdfBase64;
+    a.href = target;
     a.download = `${profile.personalInfo.fullName.replace(/\s+/g, '_')}_Tailored_Application_Resume.pdf`;
     document.body.appendChild(a);
     a.click();
@@ -261,16 +385,16 @@ export default function Dashboard() {
       )}
 
       {/* Screenshot Lightbox Modal */}
-      {screenshotModalOpen && runResult?.screenshotBase64 && (
+      {activeScreenshot && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="relative max-w-5xl w-full max-h-[92vh] flex flex-col bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl">
             <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-950">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
                 <Eye className="w-4 h-4 text-indigo-400" />
-                <span>Live Browser Verification Screenshot ({runResult.autoSubmitted ? 'Post-Submit Confirmation' : 'Pre-Submit Safety Gate'})</span>
+                <span>Verification Screenshot: {activeScreenshot.title}</span>
               </div>
               <button
-                onClick={() => setScreenshotModalOpen(false)}
+                onClick={() => setActiveScreenshot(null)}
                 className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
               >
                 <X className="w-5 h-5" />
@@ -279,8 +403,8 @@ export default function Dashboard() {
             <div className="overflow-auto p-4 flex-1 bg-slate-950 flex justify-center">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={runResult.screenshotBase64}
-                alt="Full Browser Screenshot"
+                src={activeScreenshot.url}
+                alt="Verification Screenshot"
                 className="max-w-full rounded-lg border border-slate-800 shadow"
               />
             </div>
@@ -299,16 +423,15 @@ export default function Dashboard() {
               <div className="flex items-center gap-2">
                 <span className="font-bold text-lg tracking-tight text-white">JobPilot AI</span>
                 <span className="text-[11px] font-semibold bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded-full border border-indigo-500/30">
-                  Cloud Native
+                  Autonomous V2
                 </span>
               </div>
-              <p className="text-xs text-slate-400">Autonomous Vercel-Ready Job Application Agent</p>
+              <p className="text-xs text-slate-400">Scrape, Tailor & Auto-Apply • Tech, Remote & Sarkari IT</p>
             </div>
           </div>
 
           {/* Cloud Readiness & Environment Badges */}
           <div className="hidden md:flex items-center gap-2.5 text-xs">
-            {/* Browser Mode Badge */}
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800/90 border border-slate-700 text-slate-300">
               <Globe className="w-3.5 h-3.5 text-indigo-400" />
               <span>
@@ -319,7 +442,6 @@ export default function Dashboard() {
               </span>
             </div>
 
-            {/* Gemini AI Status Badge */}
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800/90 border border-slate-700 text-slate-300">
               <Sparkles className="w-3.5 h-3.5 text-purple-400" />
               <span>
@@ -330,41 +452,54 @@ export default function Dashboard() {
               </span>
             </div>
 
-            {/* Vercel Serverless Ready */}
             <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>100% Vercel Ready</span>
+              <span>100% Free Resources</span>
             </div>
           </div>
         </div>
 
         {/* Tab Navigation */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-1 border-t border-slate-800/60 pt-1">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-1 border-t border-slate-800/60 pt-1 overflow-x-auto">
+          <button
+            onClick={() => setActiveTab('finder')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+              activeTab === 'finder'
+                ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg'
+                : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-700'
+            }`}
+          >
+            <Search className="w-4 h-4 text-indigo-400" />
+            <span>Auto Job Finder & Live Feeds</span>
+            <span className="px-1.5 py-0.2 rounded-full bg-indigo-600/30 text-indigo-300 text-[10px] font-bold">
+              {discoveredJobs.length || '140+'}
+            </span>
+          </button>
           <button
             onClick={() => setActiveTab('runner')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'runner'
                 ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg'
                 : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-700'
             }`}
           >
             <Play className="w-4 h-4" />
-            <span>Auto-Apply Runner</span>
+            <span>Single-URL Auto-Apply</span>
           </button>
           <button
             onClick={() => setActiveTab('profile')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'profile'
                 ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg'
                 : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-700'
             }`}
           >
             <User className="w-4 h-4" />
-            <span>Master Profile Editor</span>
+            <span>Master Profile ({profile.personalInfo.fullName.split(' ')[0]})</span>
           </button>
           <button
             onClick={() => setActiveTab('resume')}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer ${
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all cursor-pointer whitespace-nowrap ${
               activeTab === 'resume'
                 ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10 rounded-t-lg'
                 : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-700'
@@ -372,9 +507,6 @@ export default function Dashboard() {
           >
             <FileText className="w-4 h-4" />
             <span>ATS Resume & PDF</span>
-            {tailoredData && (
-              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-            )}
           </button>
         </div>
       </header>
@@ -382,7 +514,415 @@ export default function Dashboard() {
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
         {/* ========================================================= */}
-        {/* TAB 1: AUTO-APPLY RUNNER                                 */}
+        {/* TAB 1: AUTO JOB FINDER & LIVE FEEDS                       */}
+        {/* ========================================================= */}
+        {activeTab === 'finder' && (
+          <div className="space-y-6">
+            {/* Top Discovery Filter Bar */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                    <Search className="w-5 h-5 text-indigo-400" />
+                    Multi-Source Job Scraper & Autonomous Queue
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Continuously aggregates active openings across RemoteOK, Arbeitnow, Greenhouse/Lever company boards, and Sarkari IT feeds.
+                  </p>
+                </div>
+
+                {/* Source Category Pills */}
+                <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1.5 rounded-xl border border-slate-800 text-xs">
+                  <button
+                    onClick={() => {
+                      setJobCategory('all');
+                      loadJobs('all', searchQuery);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${
+                      jobCategory === 'all'
+                        ? 'bg-indigo-600 text-white shadow'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    🌐 All Sources ({discoveredJobs.length})
+                  </button>
+                  <button
+                    onClick={() => {
+                      setJobCategory('sarkari_govt');
+                      loadJobs('sarkari_govt', searchQuery);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer flex items-center gap-1 ${
+                      jobCategory === 'sarkari_govt'
+                        ? 'bg-amber-600 text-white shadow'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Landmark className="w-3.5 h-3.5" />
+                    <span>🏛️ Sarkari / Govt IT</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setJobCategory('tech_remote');
+                      loadJobs('tech_remote', searchQuery);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${
+                      jobCategory === 'tech_remote'
+                        ? 'bg-blue-600 text-white shadow'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    💻 Remote Global
+                  </button>
+                  <button
+                    onClick={() => {
+                      setJobCategory('top_companies');
+                      loadJobs('top_companies', searchQuery);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${
+                      jobCategory === 'top_companies'
+                        ? 'bg-purple-600 text-white shadow'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    🏢 Top Companies
+                  </button>
+                </div>
+              </div>
+
+              {/* Search Bar & Fast Keyword Filter Tags */}
+              <div className="flex flex-col sm:flex-row gap-3 pt-2">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && loadJobs(jobCategory, searchQuery)}
+                    placeholder="Search by role or tech (e.g. Next.js, Laravel, WordPress, SEO, PHP, Programmer)..."
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <button
+                  onClick={() => loadJobs(jobCategory, searchQuery)}
+                  disabled={isLoadingJobs}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl shadow-md flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {isLoadingJobs ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Filter className="w-3.5 h-3.5" />
+                  )}
+                  <span>Search Feeds</span>
+                </button>
+              </div>
+
+              {/* Keyword Quick Tags */}
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400 pt-1">
+                <span className="text-slate-500">Fast Filters:</span>
+                {['Next.js', 'React', 'PHP', 'Laravel', 'WordPress', 'SEO', 'MySQL', 'Full Stack', 'Programmer'].map(
+                  (kw) => (
+                    <button
+                      key={kw}
+                      onClick={() => {
+                        setSearchQuery(kw);
+                        loadJobs(jobCategory, kw);
+                      }}
+                      className="px-2.5 py-1 bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-lg text-[11px] cursor-pointer transition-colors"
+                    >
+                      {kw}
+                    </button>
+                  )
+                )}
+                {searchQuery && (
+                  <button
+                    onClick={() => {
+                      setSearchQuery('');
+                      loadJobs(jobCategory, '');
+                    }}
+                    className="text-rose-400 hover:underline text-[11px] ml-2"
+                  >
+                    Clear Filter
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Sticky Batch Control Toolbar (When 1+ jobs selected) */}
+            <div className="bg-gradient-to-r from-slate-900 via-indigo-950/60 to-slate-900 border border-indigo-500/40 rounded-2xl p-4 shadow-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={selectAllJobs}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                >
+                  {selectedJobIds.size === discoveredJobs.length ? (
+                    <CheckSquare className="w-4 h-4 text-indigo-400" />
+                  ) : (
+                    <Square className="w-4 h-4 text-slate-400" />
+                  )}
+                  <span>
+                    {selectedJobIds.size === discoveredJobs.length ? 'Deselect All' : 'Select All Jobs'}
+                  </span>
+                </button>
+
+                <div className="text-xs text-slate-300">
+                  <strong className="text-indigo-400 text-sm">{selectedJobIds.size}</strong> jobs selected for batch run
+                </div>
+              </div>
+
+              {/* Batch Settings & Action CTA */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs text-slate-300">
+                  <span>Auto-Submit:</span>
+                  <input
+                    type="checkbox"
+                    checked={autoSubmit}
+                    onChange={(e) => setAutoSubmit(e.target.checked)}
+                    className="cursor-pointer"
+                  />
+                  <span className={autoSubmit ? 'text-amber-400 font-bold' : 'text-slate-400'}>
+                    {autoSubmit ? 'Active (Direct Submit)' : 'Review-First Safe'}
+                  </span>
+                </div>
+
+                <button
+                  onClick={handleRunBatch}
+                  disabled={isBatchRunning || selectedJobIds.size === 0}
+                  className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold uppercase tracking-wider rounded-xl shadow-lg shadow-indigo-600/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-all"
+                >
+                  {isBatchRunning ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Batch Running...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4" />
+                      <span>⚡ Auto-Apply to {selectedJobIds.size || 0} Selected</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Batch Progress Bar (when running) */}
+            {batchProgress && (
+              <div className="bg-slate-900 border border-indigo-500/50 rounded-2xl p-5 shadow-xl space-y-3 animate-fade-in">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-white flex items-center gap-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                    <span>{batchProgress.stage}</span>
+                  </span>
+                  <span className="text-indigo-300 font-mono">
+                    {batchProgress.completed} / {batchProgress.total} completed ({batchProgress.successful} successful, {batchProgress.failed} failed)
+                  </span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-slate-800">
+                  <div
+                    className="bg-gradient-to-r from-indigo-500 to-emerald-500 h-2.5 transition-all duration-300"
+                    style={{
+                      width: `${(batchProgress.completed / (batchProgress.total || 1)) * 100}%`,
+                    }}
+                  ></div>
+                </div>
+              </div>
+            )}
+
+            {/* Batch Results Drawer / History (if any processed) */}
+            {batchQueue.length > 0 && (
+              <div className="bg-slate-900 border border-emerald-500/40 rounded-2xl p-5 shadow-xl space-y-3">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Completed Batch Applications Queue ({batchQueue.length})</span>
+                </h3>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-72 overflow-y-auto">
+                  {batchQueue.map((item, idx) => (
+                    <div
+                      key={idx}
+                      className="bg-slate-950 border border-slate-800 p-3 rounded-xl flex items-center justify-between text-xs"
+                    >
+                      <div>
+                        <div className="font-semibold text-white">{item.job.title}</div>
+                        <div className="text-[11px] text-slate-400">
+                          {item.job.company} • Match: <strong className="text-emerald-400">{item.matchScore}%</strong>
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-1">
+                          Status: <span className="text-indigo-300 font-medium">{item.status}</span> ({item.fieldsFilledCount} fields filled)
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        {item.screenshotBase64 && (
+                          <button
+                            onClick={() =>
+                              setActiveScreenshot({
+                                url: item.screenshotBase64!,
+                                title: `${item.job.title} at ${item.job.company}`,
+                              })
+                            }
+                            className="p-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-300 cursor-pointer"
+                            title="View Screenshot Proof"
+                          >
+                            <Eye className="w-3.5 h-3.5 text-indigo-400" />
+                          </button>
+                        )}
+                        {item.pdfBase64 && (
+                          <button
+                            onClick={() => handleDownloadUploadedPdf(item.pdfBase64)}
+                            className="p-1.5 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700 rounded text-emerald-300 cursor-pointer"
+                            title="Download Tailored PDF"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Discovered Jobs Card Grid */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+                <span>Showing {discoveredJobs.length} active opportunities</span>
+                <span>Select cards to batch apply, or click &quot;Apply Now&quot; for instant run</span>
+              </div>
+
+              {isLoadingJobs ? (
+                <div className="py-20 text-center space-y-3 bg-slate-900/40 rounded-2xl border border-slate-800">
+                  <RefreshCw className="w-8 h-8 text-indigo-400 animate-spin mx-auto" />
+                  <p className="text-sm text-slate-300">Scraping and aggregating jobs across all free feeds...</p>
+                </div>
+              ) : discoveredJobs.length === 0 ? (
+                <div className="py-20 text-center space-y-3 bg-slate-900/40 rounded-2xl border border-slate-800">
+                  <AlertTriangle className="w-8 h-8 text-amber-400 mx-auto" />
+                  <p className="text-sm text-slate-300">No jobs matched your filter. Try clearing keywords.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {discoveredJobs.map((job) => {
+                    const isSelected = selectedJobIds.has(job.id);
+                    const isSarkari = job.category === 'sarkari_govt';
+                    const isTopCompany = job.category === 'top_companies';
+
+                    return (
+                      <div
+                        key={job.id}
+                        className={`bg-slate-900 border rounded-2xl p-5 shadow-xl transition-all flex flex-col justify-between space-y-4 hover:border-indigo-500/60 ${
+                          isSelected ? 'border-indigo-500 bg-indigo-950/20' : 'border-slate-800'
+                        }`}
+                      >
+                        {/* Header: Title, Company, Source & Selection Checkbox */}
+                        <div>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-start gap-3">
+                              <button
+                                onClick={() => toggleJobSelection(job.id)}
+                                className="mt-1 text-slate-400 hover:text-indigo-400 cursor-pointer"
+                              >
+                                {isSelected ? (
+                                  <CheckSquare className="w-5 h-5 text-indigo-400" />
+                                ) : (
+                                  <Square className="w-5 h-5 text-slate-600" />
+                                )}
+                              </button>
+
+                              <div>
+                                <div className="flex items-center gap-2 flex-wrap mb-1">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${
+                                      isSarkari
+                                        ? 'bg-amber-950 text-amber-300 border-amber-700'
+                                        : isTopCompany
+                                        ? 'bg-purple-950 text-purple-300 border-purple-700'
+                                        : 'bg-blue-950 text-blue-300 border-blue-700'
+                                    }`}
+                                  >
+                                    {job.source}
+                                  </span>
+
+                                  {job.salary && (
+                                    <span className="text-[11px] text-emerald-400 font-mono">
+                                      {job.salary}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <h3 className="font-bold text-base text-white hover:text-indigo-300 transition-colors">
+                                  {job.title}
+                                </h3>
+
+                                <div className="text-xs text-slate-400 flex items-center gap-2 mt-1">
+                                  <span className="font-medium text-slate-300">{job.company}</span>
+                                  <span>•</span>
+                                  <span>{job.location}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Match Score Badge */}
+                            {job.matchScore && (
+                              <div className="text-center px-2.5 py-1 bg-slate-950 rounded-xl border border-slate-800 shrink-0">
+                                <div className="text-[9px] text-slate-400 uppercase font-semibold">Match</div>
+                                <div className="text-sm font-bold text-emerald-400">{job.matchScore}%</div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Description Snippet */}
+                          <p className="text-xs text-slate-300 line-clamp-3 mt-3 leading-relaxed">
+                            {job.description}
+                          </p>
+
+                          {/* Tags */}
+                          <div className="flex flex-wrap gap-1.5 mt-3">
+                            {job.tags.slice(0, 5).map((t, idx) => (
+                              <span
+                                key={idx}
+                                className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-400 font-mono"
+                              >
+                                {t}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Action Footer */}
+                        <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+                          <span className="text-[11px] text-slate-500">{job.postedAt}</span>
+
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={job.applyUrl || job.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium border border-slate-700 flex items-center gap-1"
+                            >
+                              <span>Original URL</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+
+                            <button
+                              onClick={() => handleDirectApply(job)}
+                              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow-md flex items-center gap-1 cursor-pointer transition-colors"
+                            >
+                              <Play className="w-3 h-3 fill-current" />
+                              <span>Auto-Apply</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB 2: SINGLE-URL AUTO-APPLY RUNNER                      */}
         {/* ========================================================= */}
         {activeTab === 'runner' && (
           <div className="space-y-6">
@@ -425,14 +965,14 @@ export default function Dashboard() {
               <div className="pt-5 space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
-                    Job Posting URL (Greenhouse, Lever, LinkedIn, Workday, etc.)
+                    Job Posting URL (Greenhouse, Lever, LinkedIn, Workday, Sarkari Portal, etc.)
                   </label>
                   <div className="relative">
                     <input
-                      type="url"
+                      type="text"
                       value={jobUrl}
                       onChange={(e) => setJobUrl(e.target.value)}
-                      placeholder="https://..."
+                      placeholder="https://... or /demo-job"
                       className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-mono"
                     />
                   </div>
@@ -540,7 +1080,7 @@ export default function Dashboard() {
 
                     {runResult.pdfBase64 && (
                       <button
-                        onClick={handleDownloadUploadedPdf}
+                        onClick={() => handleDownloadUploadedPdf()}
                         className="px-3.5 py-2.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-all"
                       >
                         <FileCheck className="w-4 h-4" />
@@ -572,7 +1112,12 @@ export default function Dashboard() {
                       </span>
                       {runResult.screenshotBase64 && (
                         <button
-                          onClick={() => setScreenshotModalOpen(true)}
+                          onClick={() =>
+                            setActiveScreenshot({
+                              url: runResult.screenshotBase64!,
+                              title: runResult.jobTitle || 'Application Preview',
+                            })
+                          }
                           className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
                         >
                           <Maximize2 className="w-3 h-3" />
@@ -582,7 +1127,13 @@ export default function Dashboard() {
                     </div>
 
                     <div
-                      onClick={() => runResult.screenshotBase64 && setScreenshotModalOpen(true)}
+                      onClick={() =>
+                        runResult.screenshotBase64 &&
+                        setActiveScreenshot({
+                          url: runResult.screenshotBase64,
+                          title: runResult.jobTitle || 'Application Preview',
+                        })
+                      }
                       className="relative bg-slate-950 border border-slate-800 rounded-xl overflow-hidden aspect-video flex items-center justify-center cursor-pointer group"
                     >
                       {runResult.screenshotBase64 ? (
@@ -700,7 +1251,7 @@ export default function Dashboard() {
         )}
 
         {/* ========================================================= */}
-        {/* TAB 2: MASTER PROFILE EDITOR                              */}
+        {/* TAB 3: MASTER PROFILE EDITOR                              */}
         {/* ========================================================= */}
         {activeTab === 'profile' && (
           <div className="space-y-6">
@@ -995,7 +1546,7 @@ export default function Dashboard() {
         )}
 
         {/* ========================================================= */}
-        {/* TAB 3: ATS RESUME PREVIEW & PDF DOWNLOAD                   */}
+        {/* TAB 4: ATS RESUME PREVIEW & PDF DOWNLOAD                   */}
         {/* ========================================================= */}
         {activeTab === 'resume' && (
           <div className="space-y-6">
@@ -1267,7 +1818,7 @@ export default function Dashboard() {
 
       {/* Footer */}
       <footer className="border-t border-slate-800/80 bg-slate-950 py-4 text-center text-xs text-slate-500">
-        <p>JobPilot AI • 100% Cloud-Native • Next.js App Router • Vercel Compatible • Gemini 2.5 Flash</p>
+        <p>JobPilot AI • 100% Cloud-Native • Autonomous Scraper & Auto-Apply • Next.js App Router • Gemini 2.5 Flash</p>
       </footer>
     </div>
   );
