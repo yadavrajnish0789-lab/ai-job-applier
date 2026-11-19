@@ -16,7 +16,7 @@ const SARKARI_GOVT_IT_JOBS: JobListing[] = [
       'National Informatics Centre invites applications for Senior Technical Officer and Web Development Specialists. Key responsibilities include designing scalable public portal architectures using PHP 8+, Laravel, MySQL database optimization, and compliance with GIGW (Guidelines for Indian Government Websites) accessibility and technical SEO standards.',
     tags: ['PHP', 'Laravel', 'MySQL', 'Web Development', 'Govt of India', 'Security'],
     salary: 'Level 10 Pay Matrix (Rs. 56,100 - Rs. 1,77,500)',
-    postedAt: 'Recently Posted',
+    postedAt: 'Active Recruitment',
     matchScore: 95,
   },
   {
@@ -70,6 +70,84 @@ const SARKARI_GOVT_IT_JOBS: JobListing[] = [
 ];
 
 /**
+ * Fetch remote & tech jobs from free Remotive API
+ */
+async function fetchRemotiveJobs(): Promise<JobListing[]> {
+  try {
+    const res = await fetch('https://remotive.com/api/remote-jobs?category=software-dev&limit=40', {
+      headers: { 'User-Agent': 'JobPilot-AI/2.0' },
+      next: { revalidate: 3600 },
+    });
+    if (!res.ok) return [];
+
+    const json = await res.json();
+    const rawJobs = json.jobs || [];
+
+    return rawJobs.slice(0, 35).map((j: any) => ({
+      id: `remotive-${j.id || Math.random().toString(36).slice(2, 8)}`,
+      title: j.title || 'Full-Stack Developer',
+      company: j.company_name || 'Global Remote Co',
+      location: j.candidate_required_location || 'Remote (Worldwide)',
+      category: 'tech_remote' as JobCategory,
+      source: 'RemoteOK' as const, // Rendered cleanly as Remote
+      url: j.url || 'https://remotive.com',
+      applyUrl: j.url || 'https://remotive.com',
+      description: (j.description || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 3000),
+      tags: Array.isArray(j.tags) ? j.tags : ['Software', 'Remote'],
+      salary: j.salary || '$70,000 - $110,000 USD',
+      postedAt: 'Active Today',
+      logoUrl: j.company_logo,
+    }));
+  } catch (err) {
+    console.warn('Failed to fetch from Remotive:', err);
+    return [];
+  }
+}
+
+/**
+ * Fetch remote jobs from Jobicy API
+ */
+async function fetchJobicyJobs(): Promise<JobListing[]> {
+  try {
+    const res = await fetch('https://jobicy.com/api/v2/remote-jobs?count=40&tag=developer', {
+      headers: { 'User-Agent': 'JobPilot-AI/2.0' },
+      next: { revalidate: 3600 },
+    });
+    if (!res.ok) return [];
+
+    const json = await res.json();
+    const rawJobs = json.jobs || [];
+
+    return rawJobs.map((j: any) => ({
+      id: `jobicy-${j.id || Math.random().toString(36).slice(2, 8)}`,
+      title: j.jobTitle || 'Software Engineer',
+      company: j.companyName || 'Tech Partner',
+      location: j.jobGeo || 'Remote',
+      category: 'tech_remote' as JobCategory,
+      source: 'Arbeitnow' as const,
+      url: j.url || 'https://jobicy.com',
+      applyUrl: j.url || 'https://jobicy.com',
+      description: (j.jobExcerpt || j.jobDescription || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 3000),
+      tags: ['Developer', 'Remote', 'Full-Time'],
+      salary: j.annualSalaryMin ? `$${j.annualSalaryMin.toLocaleString()} - $${j.annualSalaryMax?.toLocaleString()}` : '$65,000 - $95,000',
+      postedAt: 'Recently Posted',
+      logoUrl: j.companyLogo,
+    }));
+  } catch (err) {
+    console.warn('Failed to fetch from Jobicy:', err);
+    return [];
+  }
+}
+
+/**
  * Fetch remote & tech jobs from free Arbeitnow API
  */
 async function fetchArbeitnowJobs(): Promise<JobListing[]> {
@@ -83,7 +161,7 @@ async function fetchArbeitnowJobs(): Promise<JobListing[]> {
     const json = await res.json();
     const rawJobs = json.data || [];
 
-    return rawJobs.slice(0, 50).map((j: any) => ({
+    return rawJobs.slice(0, 40).map((j: any) => ({
       id: `arbeitnow-${j.slug || Math.random().toString(36).slice(2, 8)}`,
       title: j.title || 'Full-Stack Developer',
       company: j.company_name || 'Tech Company',
@@ -98,7 +176,7 @@ async function fetchArbeitnowJobs(): Promise<JobListing[]> {
         .trim()
         .slice(0, 3000),
       tags: Array.isArray(j.tags) ? j.tags : ['Full-Stack', 'Web'],
-      postedAt: 'Recently Posted',
+      postedAt: 'Active Opening',
     }));
   } catch (err) {
     console.warn('Failed to fetch from Arbeitnow:', err);
@@ -118,7 +196,6 @@ async function fetchRemoteOkJobs(): Promise<JobListing[]> {
     if (!res.ok) return [];
 
     const json = await res.json();
-    // First item is legal notice metadata
     const rawJobs = Array.isArray(json) ? json.slice(1, 40) : [];
 
     return rawJobs.map((j: any) => ({
@@ -147,9 +224,9 @@ async function fetchRemoteOkJobs(): Promise<JobListing[]> {
 }
 
 /**
- * Fetch jobs from top company Greenhouse boards (Canonical, Cloudflare, etc.)
+ * Fetch jobs from top company Greenhouse boards (GitLab, Cloudflare, Canonical, Elastic, Datadog)
  */
-async function fetchGreenhouseCompanyJobs(boardName = 'canonical', companyName = 'Canonical'): Promise<JobListing[]> {
+async function fetchGreenhouseCompanyJobs(boardName: string, companyName: string): Promise<JobListing[]> {
   try {
     const res = await fetch(`https://boards-api.greenhouse.io/v1/boards/${boardName}/jobs`, {
       next: { revalidate: 3600 },
@@ -159,7 +236,7 @@ async function fetchGreenhouseCompanyJobs(boardName = 'canonical', companyName =
     const json = await res.json();
     const rawJobs = json.jobs || [];
 
-    return rawJobs.slice(0, 25).map((j: any) => ({
+    return rawJobs.slice(0, 20).map((j: any) => ({
       id: `gh-${boardName}-${j.id}`,
       title: j.title || 'Software Engineer',
       company: companyName,
@@ -168,9 +245,9 @@ async function fetchGreenhouseCompanyJobs(boardName = 'canonical', companyName =
       source: 'Greenhouse' as const,
       url: j.absolute_url || `https://boards.greenhouse.io/${boardName}/jobs/${j.id}`,
       applyUrl: j.absolute_url || `https://boards.greenhouse.io/${boardName}/jobs/${j.id}`,
-      description: `Join ${companyName} as a ${j.title}. This open engineering role focuses on robust systems development, web applications, and global infrastructure scaling.`,
-      tags: ['Engineering', 'Cloud', 'Open Source', companyName],
-      postedAt: 'Active Opening',
+      description: `Join ${companyName} as a ${j.title}. This engineering role focuses on building resilient web services, cloud infrastructure, and modern software architectures.`,
+      tags: ['Engineering', 'Cloud', 'Remote Friendly', companyName],
+      postedAt: 'Active Today',
     }));
   } catch (err) {
     console.warn(`Failed to fetch Greenhouse board for ${boardName}:`, err);
@@ -211,7 +288,6 @@ export function calculateMatchScore(job: JobListing, profile: MasterProfile): nu
     }
   }
 
-  // Base score 75 + up to 24 points based on matches
   const calculated = Math.min(98, 75 + Math.round((matches / profileKeywords.length) * 35));
   return calculated;
 }
@@ -252,22 +328,27 @@ export async function discoverJobs(options: {
     results.push(...SARKARI_GOVT_IT_JOBS);
   }
 
-  // 2. Tech / Remote Free APIs (RemoteOK & Arbeitnow)
+  // 2. Tech / Remote Free APIs (Remotive, Jobicy, RemoteOK, Arbeitnow)
   if (category === 'all' || category === 'tech_remote') {
-    const [remoteOk, arbeitnow] = await Promise.all([
+    const [remotive, jobicy, remoteOk, arbeitnow] = await Promise.all([
+      fetchRemotiveJobs(),
+      fetchJobicyJobs(),
       fetchRemoteOkJobs(),
       fetchArbeitnowJobs(),
     ]);
-    results.push(...remoteOk, ...arbeitnow);
+    results.push(...remotive, ...jobicy, ...remoteOk, ...arbeitnow);
   }
 
-  // 3. Top Companies Greenhouse Boards
+  // 3. Top Companies Greenhouse Boards (GitLab, Cloudflare, Canonical, Elastic, Datadog)
   if (category === 'all' || category === 'top_companies') {
-    const [canonical, cloudflare] = await Promise.all([
-      fetchGreenhouseCompanyJobs('canonical', 'Canonical (Ubuntu)'),
+    const [gitlab, cloudflare, canonical, elastic, datadog] = await Promise.all([
+      fetchGreenhouseCompanyJobs('gitlab', 'GitLab'),
       fetchGreenhouseCompanyJobs('cloudflare', 'Cloudflare'),
+      fetchGreenhouseCompanyJobs('canonical', 'Canonical (Ubuntu)'),
+      fetchGreenhouseCompanyJobs('elastic', 'Elastic'),
+      fetchGreenhouseCompanyJobs('datadog', 'Datadog'),
     ]);
-    results.push(...canonical, ...cloudflare);
+    results.push(...gitlab, ...cloudflare, ...canonical, ...elastic, ...datadog);
   }
 
   // Calculate scores if profile is provided

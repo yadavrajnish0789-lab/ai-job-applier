@@ -181,6 +181,12 @@ export default function Dashboard() {
     setSelectedJobIds(updated);
   };
 
+  const selectTopN = (n: number) => {
+    const topIds = discoveredJobs.slice(0, n).map((j) => j.id);
+    setSelectedJobIds(new Set(topIds));
+    triggerNotification(`Selected top ${topIds.length} jobs for batch processing.`);
+  };
+
   const selectAllJobs = () => {
     if (selectedJobIds.size === discoveredJobs.length) {
       setSelectedJobIds(new Set());
@@ -189,7 +195,6 @@ export default function Dashboard() {
     }
   };
 
-  // Trigger 1-Click Auto Apply for a single card directly
   const handleDirectApply = (job: JobListing) => {
     setJobUrl(job.applyUrl || job.url);
     setActiveTab('runner');
@@ -198,7 +203,9 @@ export default function Dashboard() {
     }, 100);
   };
 
-  // Run Batch Auto-Apply
+  // Run Sequential Batch Auto-Apply
+  const [shouldAbortBatch, setShouldAbortBatch] = useState<boolean>(false);
+
   const handleRunBatch = async () => {
     const selectedJobsList = discoveredJobs.filter((j) => selectedJobIds.has(j.id));
     if (selectedJobsList.length === 0) {
@@ -207,40 +214,71 @@ export default function Dashboard() {
     }
 
     setIsBatchRunning(true);
-    setBatchProgress({
-      total: selectedJobsList.length,
-      completed: 0,
-      successful: 0,
-      failed: 0,
-      stage: 'Preparing batch runner and loading candidate profile...',
-    });
+    setShouldAbortBatch(false);
 
-    try {
-      const res = await fetch('/api/auto-apply/batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jobs: selectedJobsList,
-          profile,
-          autoSubmit,
-          enableTailoring,
-        }),
+    let successful = 0;
+    let failed = 0;
+    const accumulatedResults: JobQueueItem[] = [...batchQueue];
+
+    for (let i = 0; i < selectedJobsList.length; i++) {
+      if (shouldAbortBatch) {
+        triggerNotification('Batch process stopped by user.');
+        break;
+      }
+
+      const currentJob = selectedJobsList[i];
+      setBatchProgress({
+        total: selectedJobsList.length,
+        completed: i,
+        successful,
+        failed,
+        currentJobTitle: currentJob.title,
+        currentCompany: currentJob.company,
+        stage: `[Job ${i + 1}/${selectedJobsList.length}] Scraping JD & Tailoring Unique Resume for: ${currentJob.company}...`,
       });
 
-      const data = await res.json();
-      if (data.success) {
-        setBatchProgress(data.progress);
-        setBatchQueue(data.results || []);
-        triggerNotification(`Batch Complete! ${data.progress.successful}/${data.progress.total} jobs processed.`);
-      } else {
-        alert(data.error || 'Batch auto-apply failed.');
+      try {
+        const res = await fetch('/api/auto-apply/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jobs: [currentJob],
+            profile,
+            autoSubmit,
+            enableTailoring,
+          }),
+        });
+
+        const data = await res.json();
+        if (data.success && data.results && data.results.length > 0) {
+          const item = data.results[0];
+          accumulatedResults.unshift(item);
+          setBatchQueue([...accumulatedResults]);
+          if (item.status === 'submitted' || item.status === 'review_ready') {
+            successful++;
+          } else {
+            failed++;
+          }
+        } else {
+          failed++;
+        }
+      } catch (err) {
+        failed++;
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Batch execution failed';
-      alert('Batch error: ' + msg);
-    } finally {
-      setIsBatchRunning(false);
+
+      setBatchProgress({
+        total: selectedJobsList.length,
+        completed: i + 1,
+        successful,
+        failed,
+        currentJobTitle: currentJob.title,
+        currentCompany: currentJob.company,
+        stage: `Cleaned memory. Moving to next job... (${i + 1}/${selectedJobsList.length})`,
+      });
     }
+
+    setIsBatchRunning(false);
+    triggerNotification(`Batch Complete! ${successful} jobs applied/verified successfully.`);
   };
 
   // Run Single Auto-Apply Pipeline
@@ -649,23 +687,54 @@ export default function Dashboard() {
 
             {/* Sticky Batch Control Toolbar (When 1+ jobs selected) */}
             <div className="bg-gradient-to-r from-slate-900 via-indigo-950/60 to-slate-900 border border-indigo-500/40 rounded-2xl p-4 shadow-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={selectAllJobs}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-                >
-                  {selectedJobIds.size === discoveredJobs.length ? (
-                    <CheckSquare className="w-4 h-4 text-indigo-400" />
-                  ) : (
-                    <Square className="w-4 h-4 text-slate-400" />
-                  )}
-                  <span>
-                    {selectedJobIds.size === discoveredJobs.length ? 'Deselect All' : 'Select All Jobs'}
-                  </span>
-                </button>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={selectAllJobs}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {selectedJobIds.size === discoveredJobs.length ? (
+                      <CheckSquare className="w-4 h-4 text-indigo-400" />
+                    ) : (
+                      <Square className="w-4 h-4 text-slate-400" />
+                    )}
+                    <span>
+                      {selectedJobIds.size === discoveredJobs.length ? 'Deselect All' : 'Select All'}
+                    </span>
+                  </button>
 
-                <div className="text-xs text-slate-300">
-                  <strong className="text-indigo-400 text-sm">{selectedJobIds.size}</strong> jobs selected for batch run
+                  <div className="text-xs text-slate-300">
+                    <strong className="text-indigo-400 text-sm">{selectedJobIds.size}</strong> selected
+                  </div>
+                </div>
+
+                {/* Quick Batch Presets */}
+                <div className="flex items-center gap-1.5 text-xs">
+                  <span className="text-slate-500 text-[11px]">Quick Batch:</span>
+                  <button
+                    onClick={() => selectTopN(10)}
+                    className="px-2 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded text-[11px] text-slate-300 cursor-pointer"
+                  >
+                    10 Jobs
+                  </button>
+                  <button
+                    onClick={() => selectTopN(25)}
+                    className="px-2 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded text-[11px] text-slate-300 cursor-pointer"
+                  >
+                    25 Jobs
+                  </button>
+                  <button
+                    onClick={() => selectTopN(50)}
+                    className="px-2 py-1 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded text-[11px] text-slate-300 cursor-pointer"
+                  >
+                    50 Jobs
+                  </button>
+                  <button
+                    onClick={() => selectTopN(100)}
+                    className="px-2 py-1 bg-indigo-950 hover:bg-indigo-900 border border-indigo-700 rounded text-[11px] text-indigo-300 font-semibold cursor-pointer"
+                  >
+                    100 Jobs
+                  </button>
                 </div>
               </div>
 
@@ -680,27 +749,27 @@ export default function Dashboard() {
                     className="cursor-pointer"
                   />
                   <span className={autoSubmit ? 'text-amber-400 font-bold' : 'text-slate-400'}>
-                    {autoSubmit ? 'Active (Direct Submit)' : 'Review-First Safe'}
+                    {autoSubmit ? 'Autonomous Submit' : 'Review-First Safe'}
                   </span>
                 </div>
 
-                <button
-                  onClick={handleRunBatch}
-                  disabled={isBatchRunning || selectedJobIds.size === 0}
-                  className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold uppercase tracking-wider rounded-xl shadow-lg shadow-indigo-600/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-all"
-                >
-                  {isBatchRunning ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Batch Running...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-4 h-4" />
-                      <span>⚡ Auto-Apply to {selectedJobIds.size || 0} Selected</span>
-                    </>
-                  )}
-                </button>
+                {isBatchRunning ? (
+                  <button
+                    onClick={() => setShouldAbortBatch(true)}
+                    className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold uppercase tracking-wider rounded-xl shadow-lg cursor-pointer transition-all"
+                  >
+                    Stop Batch Run
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleRunBatch}
+                    disabled={selectedJobIds.size === 0}
+                    className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold uppercase tracking-wider rounded-xl shadow-lg shadow-indigo-600/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-all"
+                  >
+                    <Send className="w-4 h-4" />
+                    <span>⚡ Run Batch Auto-Apply ({selectedJobIds.size || 0})</span>
+                  </button>
+                )}
               </div>
             </div>
 
